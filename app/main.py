@@ -1,241 +1,185 @@
-from fastapi import FastAPI, HTTPException, File, UploadFile, Request
-from pydantic import BaseModel
-from fastapi.middleware.cors import CORSMiddleware
-import tensorflow as tf
 import numpy as np
-import io
-import os
+import librosa
+import tensorflow as tf
 import logging
-import json
-from typing import Dict, List, Optional
+import os
+import aiohttp
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import Dict, List
 
-# Set up logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger("baby-cry-detection")
 
-# Initialize FastAPI app
+# Initialize the FastAPI application
 app = FastAPI(
     title="Baby Cry Detection API",
-    description="API for classifying baby cry sounds",
+    description="API for analyzing baby cry audio to determine the likely cause",
     version="1.0.0"
 )
 
 # Enable CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Adjust in production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Configuration class (similar to demo.py)
+# Global variables
+model = None
+mean_value = None
+std_value = None
+
+# Configuration
 class Config:
     CLASS_LABELS = ['unwelltired', 'hungry', 'others', 'laugh', 'quiet']
     NUM_CLASSES = len(CLASS_LABELS)
-    MAX_FRAMES = 48
-    N_MFCC = 24
-    SAMPLE_RATE = 16000
+    MAX_FRAMES = 48  # Match your model's expected input
+    N_MFCC = 24      # Match your model's expected input
+    SAMPLE_RATE = 16000  # Match ESP8266 sampling rate
+    HOP_LENGTH = 512
+    N_FFT = 1024
 
-# Global variables to store the model and normalization values
-model = None
-mean_value = 0  # Default value if file not found
-std_value = 1   # Default value if file not found
-
-# Response model for predictions
+# Response models
 class PredictionResponse(BaseModel):
-    predicted_class: str
+    reason: str
     confidence: float
-    all_probabilities: Dict[str, float]
-    status: str
+    class_probabilities: Dict[str, float]
+    status: str = "success"
 
 class StatusResponse(BaseModel):
     status: str
     message: str
 
-# Build model architecture
-def build_model():
-    from tensorflow.keras.layers import (
-        InputLayer, BatchNormalization, Conv2D, SeparableConv2D, MaxPooling2D,
-        Dense, Dropout, GlobalAveragePooling2D, Reshape, Bidirectional, 
-        LSTM, Multiply, Concatenate
-    )
-    
-    # Define input shape
-    inputs = tf.keras.Input(shape=(Config.MAX_FRAMES, Config.N_MFCC, 1))
-    
-    # Preprocessing
-    x = BatchNormalization()(inputs)
-    
-    # First convolutional block with residual connection
-    conv1 = SeparableConv2D(48, (3,3), activation='relu', padding='same')(x)
-    conv1 = BatchNormalization()(conv1)
-    conv1 = SeparableConv2D(48, (3,3), activation='relu', padding='same')(conv1)
-    conv1 = BatchNormalization()(conv1)
-    
-    # Add residual connection
-    x = Conv2D(48, (1,1), padding='same')(x)  # 1x1 conv to match dimensions
-    x = tf.keras.layers.add([x, conv1])
-    x = tf.keras.layers.Activation('relu')(x)
-    x = MaxPooling2D((2,2))(x)
-    x = Dropout(0.3)(x)
-    
-    # Second block with attention mechanism
-    conv2 = SeparableConv2D(96, (3,3), activation='relu', padding='same')(x)
-    conv2 = BatchNormalization()(conv2)
-    
-    # Channel attention
-    att = GlobalAveragePooling2D()(conv2)
-    att = Dense(96, activation='sigmoid')(att)
-    att = Reshape((1, 1, 96))(att)
-    conv2 = Multiply()([conv2, att])
-    
-    x = MaxPooling2D((2,2))(conv2)
-    x = Dropout(0.4)(x)
-    
-    # Global spatial features
-    spatial_features = GlobalAveragePooling2D()(x)
-    
-    # Temporal features using LSTM
-    # Reshape for LSTM processing
-    reshape_layer = Reshape((-1, x.shape[-1] * x.shape[-2]))(x)
-    lstm_layer = Bidirectional(LSTM(64))(reshape_layer)
-    
-    # Combine features
-    combined = Concatenate()([spatial_features, lstm_layer])
-    combined = Dropout(0.5)(combined)
-    
-    # Final classification head
-    x = Dense(128, activation='relu')(combined)
-    x = BatchNormalization()(x)
-    x = Dropout(0.5)(x)
-    
-    outputs = Dense(Config.NUM_CLASSES, activation='softmax', dtype='float32')(x)
-    
-    model = tf.keras.Model(inputs=inputs, outputs=outputs)
-    return model
-
-# Data preprocessing function
-def preprocess_mfcc(mfcc_data):
-    """Preprocess MFCC data for model input"""
-    try:
-        # Handle dimensionality
-        if mfcc_data.ndim == 2:
-            mfcc_data = np.expand_dims(mfcc_data, axis=0)
-        
-        # Time axis alignment
-        if mfcc_data.shape[1] < Config.MAX_FRAMES:
-            pad_width = ((0, 0), (0, Config.MAX_FRAMES - mfcc_data.shape[1]), (0, 0))
-            mfcc_data = np.pad(mfcc_data, pad_width, mode='constant')
-        else:
-            mfcc_data = mfcc_data[:, :Config.MAX_FRAMES, :]
-        
-        # Add channel dimension
-        mfcc_data = np.expand_dims(mfcc_data, axis=-1)
-        
-        # Normalize
-        global mean_value, std_value
-        return (mfcc_data - mean_value) / (std_value + 1e-8)
-        
-    except Exception as e:
-        logger.error(f"Error preprocessing MFCC data: {str(e)}")
-        raise HTTPException(status_code=400, detail=f"Error preprocessing data: {str(e)}")
-
-# Post-processing correction function
-def correct_predictions(predictions):
-    """Apply post-processing correction to predictions"""
-    corrected = predictions.copy()
-    unwelltired_idx = Config.CLASS_LABELS.index('unwelltired')
-    hungry_idx = Config.CLASS_LABELS.index('hungry')
-    
-    # For predictions where hungry is top but unwelltired is close behind
-    for i in range(len(corrected)):
-        pred_class = np.argmax(corrected[i])
-        if pred_class == hungry_idx:
-            # If model is unsure between hungry and unwelltired
-            if (corrected[i, hungry_idx] < 0.65 and 
-                corrected[i, unwelltired_idx] > 0.25):
-                # Boost unwelltired probability
-                boost = corrected[i, hungry_idx] * 0.3
-                corrected[i, hungry_idx] -= boost
-                corrected[i, unwelltired_idx] += boost
-    
-    return corrected
-
-# Process audio data from ESP8266
-def process_audio_data(audio_data):
-    """Convert raw audio to MFCC features"""
-    try:
-        # This function converts raw audio to MFCC features
-        import librosa
-        
-        # Convert int16 audio data to float
-        audio_float = audio_data.astype(np.float32) / 32768.0
-        
-        # Extract MFCC features
-        mfcc = librosa.feature.mfcc(
-            y=audio_float, 
-            sr=Config.SAMPLE_RATE,
-            n_mfcc=Config.N_MFCC,
-            n_fft=1024,
-            hop_length=512
-        )
-        
-        # Transpose to time x features
-        mfcc = mfcc.T
-        
-        # Prepare for model input
-        mfcc_expanded = np.expand_dims(np.expand_dims(mfcc, 0), -1)
-        
-        # Normalize using stored values
-        global mean_value, std_value
-        return (mfcc_expanded - mean_value) / (std_value + 1e-8)
-        
-    except Exception as e:
-        logger.error(f"Error processing audio data: {str(e)}")
-        raise HTTPException(status_code=400, detail=f"Error processing audio: {str(e)}")
-
-# Add this near your other endpoint definitions
-@app.get("/")
-async def root():
-    return {
-        "message": "Baby Cry Detection API is running",
-        "endpoints": {
-            "status": "/status",
-            "docs": "/docs",
-            "predict": "/predict",
-            "analyze": "/analyze-cry"
-        }
-    }
-
 # Load model at startup
 @app.on_event("startup")
 async def load_model():
+    """Load the TensorFlow model when the application starts"""
     global model, mean_value, std_value
-    
     try:
-        logger.info("Loading model...")
-        model = build_model()
+        # Build model architecture
+        from tensorflow.keras.layers import (
+            InputLayer, BatchNormalization, Conv2D, MaxPooling2D,
+            Dense, Dropout, GlobalAveragePooling2D
+        )
         
-        # Try to load the model, but don't fail if it doesn't exist
+        model = tf.keras.Sequential([
+            InputLayer(shape=(Config.MAX_FRAMES, Config.N_MFCC, 1)),
+            BatchNormalization(),
+            
+            Conv2D(64, (3,3), activation='relu', padding='same'),
+            MaxPooling2D((2,2)),
+            Dropout(0.3),
+            
+            Conv2D(128, (3,3), activation='relu', padding='same'),
+            GlobalAveragePooling2D(),
+            Dropout(0.4),
+            
+            Dense(Config.NUM_CLASSES, activation='softmax')
+        ])
+        
+        # Try to load saved model weights
         try:
             model.load_weights('best_model.keras')
-            logger.info("Model loaded successfully")
+            logger.info("Model weights loaded successfully")
         except:
             logger.warning("Could not load model weights. Using uninitialized model.")
-            
-        # Try to load normalization values, but don't fail if they don't exist
+        
+        # Try to load normalization values
         try:
             mean_value = np.load('mean.npy')
             std_value = np.load('std.npy')
             logger.info("Normalization values loaded successfully")
         except:
-            logger.warning("Could not load normalization values. Using defaults (mean=0, std=1).")
-            
+            logger.warning("Could not load normalization values. Using defaults (0,1).")
+            mean_value = 0
+            std_value = 1
+        
+        logger.info("Model initialization complete")
     except Exception as e:
-        logger.error(f"Error during startup: {str(e)}")
+        logger.error(f"Error during model initialization: {str(e)}")
+        model = None
 
-# API status endpoint
+# Process raw audio data
+def process_raw_audio(audio_data, sample_rate=Config.SAMPLE_RATE):
+    """Process raw audio data into MFCC features suitable for the model"""
+    try:
+        # Convert int16 audio to float
+        audio_float = audio_data.astype(np.float32) / 32768.0
+        
+        # Extract MFCC features
+        mfcc = librosa.feature.mfcc(
+            y=audio_float, 
+            sr=sample_rate,
+            n_mfcc=Config.N_MFCC,
+            n_fft=Config.N_FFT,
+            hop_length=Config.HOP_LENGTH
+        )
+        
+        # Transpose to time x features
+        mfcc = mfcc.T
+        
+        # Handle time dimension (frames)
+        if mfcc.shape[0] < Config.MAX_FRAMES:
+            # Pad if too short
+            pad_width = ((0, Config.MAX_FRAMES - mfcc.shape[0]), (0, 0))
+            mfcc = np.pad(mfcc, pad_width, mode='constant')
+        else:
+            # Trim if too long
+            mfcc = mfcc[:Config.MAX_FRAMES, :]
+        
+        # Add batch and channel dimensions
+        mfcc = np.expand_dims(mfcc, axis=0)  # Add batch dimension
+        mfcc = np.expand_dims(mfcc, axis=-1)  # Add channel dimension
+        
+        # Normalize using stored values
+        global mean_value, std_value
+        mfcc_normalized = (mfcc - mean_value) / (std_value + 1e-8)
+        
+        return mfcc_normalized
+        
+    except Exception as e:
+        logger.error(f"Error processing audio data: {str(e)}")
+        raise Exception(f"Audio processing error: {str(e)}")
+
+# Notify external devices
+async def notify_devices(cry_reason):
+    """Notify Watchy watch and mobile app about cry detection"""
+    try:
+        # Get Watchy IP from configuration
+        watch_ip = os.getenv("WATCHY_IP", "192.168.1.X")  # Replace X with actual value
+        
+        # Only try to notify if the IP is set
+        if watch_ip and "x" not in watch_ip.lower():
+            logger.info(f"Attempting to notify Watchy at {watch_ip}")
+            # Send to Watchy (vibrate endpoint)
+            async with aiohttp.ClientSession() as session:
+                watch_url = f"http://{watch_ip}/vibrate"
+                try:
+                    async with session.post(watch_url) as response:
+                        logger.info(f"Notified watch: {response.status}")
+                except Exception as e:
+                    logger.error(f"Failed to notify watch: {str(e)}")
+                    
+    except Exception as e:
+        logger.error(f"Failed to notify devices: {str(e)}")
+
+# API Routes
+@app.get("/", response_model=StatusResponse)
+async def root():
+    """Root endpoint to check if the API is running"""
+    return {
+        "status": "online", 
+        "message": "Baby Cry Detection API is running"
+    }
+
 @app.get("/status", response_model=StatusResponse)
 async def status():
     """Check if the API and model are running properly"""
@@ -243,104 +187,6 @@ async def status():
         return {"status": "error", "message": "Model not loaded"}
     return {"status": "ok", "message": "API is running and model is loaded"}
 
-# Prediction endpoint for JSON data
-@app.post("/predict", response_model=PredictionResponse)
-async def predict_from_json(file_path: str):
-    """
-    Make a prediction from an MFCC file path
-    
-    Args:
-        file_path: Path to .npy file containing MFCC data
-    """
-    if model is None:
-        raise HTTPException(status_code=503, detail="Model not loaded")
-    
-    try:
-        # Load MFCC data from the provided path
-        mfcc_data = np.load(file_path)
-        
-        # Preprocess data
-        processed_data = preprocess_mfcc(mfcc_data)
-        
-        # Get prediction
-        raw_prediction = model.predict(processed_data, verbose=0)[0]
-        
-        # Apply post-processing correction
-        corrected_prediction = correct_predictions(np.array([raw_prediction]))[0]
-        
-        # Get final class
-        predicted_class_idx = np.argmax(corrected_prediction)
-        predicted_class = Config.CLASS_LABELS[predicted_class_idx]
-        confidence = float(corrected_prediction[predicted_class_idx])
-        
-        # Prepare all probabilities as a dictionary
-        all_probs = {
-            class_name: float(prob) 
-            for class_name, prob in zip(Config.CLASS_LABELS, corrected_prediction)
-        }
-        
-        return {
-            "predicted_class": predicted_class,
-            "confidence": confidence,
-            "all_probabilities": all_probs,
-            "status": "success"
-        }
-    
-    except Exception as e:
-        logger.error(f"Error during prediction: {str(e)}")
-        raise HTTPException(status_code=400, detail=str(e))
-
-# Prediction endpoint for file upload
-@app.post("/predict/upload", response_model=PredictionResponse)
-async def predict_from_upload(file: UploadFile = File(...)):
-    """
-    Make a prediction from an uploaded MFCC .npy file
-    
-    Args:
-        file: Uploaded .npy file containing MFCC data
-    """
-    if model is None:
-        raise HTTPException(status_code=503, detail="Model not loaded")
-    
-    try:
-        # Read file content
-        content = await file.read()
-        
-        # Load MFCC data from the uploaded file
-        mfcc_data = np.load(io.BytesIO(content))
-        
-        # Preprocess data
-        processed_data = preprocess_mfcc(mfcc_data)
-        
-        # Get prediction
-        raw_prediction = model.predict(processed_data, verbose=0)[0]
-        
-        # Apply post-processing correction
-        corrected_prediction = correct_predictions(np.array([raw_prediction]))[0]
-        
-        # Get final class
-        predicted_class_idx = np.argmax(corrected_prediction)
-        predicted_class = Config.CLASS_LABELS[predicted_class_idx]
-        confidence = float(corrected_prediction[predicted_class_idx])
-        
-        # Prepare all probabilities as a dictionary
-        all_probs = {
-            class_name: float(prob) 
-            for class_name, prob in zip(Config.CLASS_LABELS, corrected_prediction)
-        }
-        
-        return {
-            "predicted_class": predicted_class,
-            "confidence": confidence,
-            "all_probabilities": all_probs,
-            "status": "success"
-        }
-    
-    except Exception as e:
-        logger.error(f"Error during prediction: {str(e)}")
-        raise HTTPException(status_code=400, detail=str(e))
-
-# Endpoint for ESP8266 to send audio data
 @app.post("/analyze-cry")
 async def analyze_cry(request: Request):
     """
@@ -362,91 +208,44 @@ async def analyze_cry(request: Request):
             
         logger.info(f"Received audio data of length: {len(audio_data)}")
         
-        try:
-            # Process audio to extract MFCC features and make prediction
-            import librosa
-            
-            # Convert int16 audio to float
-            audio_float = audio_data.astype(np.float32) / 32768.0
-            
-            # Extract MFCC features
-            mfcc = librosa.feature.mfcc(
-                y=audio_float, 
-                sr=Config.SAMPLE_RATE,
-                n_mfcc=Config.N_MFCC
-            )
-            
-            # Transpose to time x features
-            mfcc = mfcc.T
-            
-            # Ensure proper shape for model input
-            if mfcc.shape[0] < Config.MAX_FRAMES:
-                pad_width = ((0, Config.MAX_FRAMES - mfcc.shape[0]), (0, 0))
-                mfcc = np.pad(mfcc, pad_width, mode='constant')
-            else:
-                mfcc = mfcc[:Config.MAX_FRAMES, :]
-                
-            # Add batch and channel dimensions
-            mfcc = np.expand_dims(np.expand_dims(mfcc, 0), -1)
-            
-            # Normalize
-            mfcc = (mfcc - mean_value) / (std_value + 1e-8)
-            
-            # Make prediction
-            prediction = model.predict(mfcc, verbose=0)[0]
-            
-            # Apply correction
-            corrected = correct_predictions(np.array([prediction]))[0]
-            
-            # Get results
-            predicted_class_idx = np.argmax(corrected)
-            predicted_class = Config.CLASS_LABELS[predicted_class_idx]
-            confidence = float(corrected[predicted_class_idx])
-            
-            # Format for ESP8266
-            response = {
-                "reason": predicted_class,
-                "confidence": confidence,
-                "all_probabilities": {
-                    class_name: float(prob) 
-                    for class_name, prob in zip(Config.CLASS_LABELS, corrected)
-                }
-            }
-            
-            return response
-            
-        except ImportError:
-            # If librosa isn't installed, return a dummy response for testing
-            logger.warning("Librosa not installed, returning dummy prediction")
-            return {
-                "reason": "hungry",  # Default prediction
-                "confidence": 0.85,
-                "all_probabilities": {
-                    "unwelltired": 0.1,
-                    "hungry": 0.85,
-                    "others": 0.02,
-                    "laugh": 0.01,
-                    "quiet": 0.02
-                }
-            }
+        # Process the audio data
+        mfcc_features = process_raw_audio(audio_data)
+        
+        # Make prediction
+        prediction = model.predict(mfcc_features, verbose=0)[0]
+        
+        # Get predicted class and confidence
+        predicted_idx = np.argmax(prediction)
+        confidence = float(prediction[predicted_idx])
+        predicted_class = Config.CLASS_LABELS[predicted_idx]
+        
+        logger.info(f"Predicted class: {predicted_class} with confidence: {confidence:.4f}")
+        
+        # Create class probabilities dictionary
+        class_probs = {cls: float(prob) for cls, prob in zip(Config.CLASS_LABELS, prediction)}
+        
+        # Try to notify devices (don't wait for completion)
+        import asyncio
+        asyncio.create_task(notify_devices(predicted_class))
+        
+        # Return result to ESP8266
+        return {
+            "reason": predicted_class,
+            "confidence": confidence,
+            "class_probabilities": class_probs,
+            "status": "success"
+        }
             
     except Exception as e:
         logger.error(f"Error analyzing cry: {str(e)}")
         return {"status": "error", "message": str(e)}
 
-# If you need a direct connection to Arduino/ESP8266
-@app.get("/predict/esp", response_model=PredictionResponse)
-async def predict_for_esp(file_path: str):
-    """
-    Simplified prediction endpoint for ESP8266/Arduino devices
-    
-    Args:
-        file_path: Path to .npy file containing MFCC data
-    """
-    # Reuse the JSON prediction endpoint
-    result = await predict_from_json(file_path)
-    return result
+@app.get("/test")
+async def test_endpoint():
+    """Simple test endpoint to verify API functionality"""
+    return {"status": "success", "message": "Test endpoint is working"}
 
+# For running directly
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app:app", host="0.0.0.0", port=5000, reload=True)
+    uvicorn.run(app, host="0.0.0.0", port=5000)

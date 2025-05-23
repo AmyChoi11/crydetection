@@ -26,22 +26,25 @@ tf.keras.mixed_precision.set_global_policy(policy)
 # ======================
 # Optimized Configuration
 # ======================
+
+# Update Config class to process 5 seconds of audio
 class Config:
     CLASS_LABELS = [
         'unwelltired', 'hungry', 'others', 'laugh',
         'quiet'
     ]
     NUM_CLASSES = len(CLASS_LABELS)
-    BATCH_SIZE = 64
-    EPOCHS = 50        # Increased for better training
-    LEARNING_RATE = 0.001  # Reduced for better generalization
+    BATCH_SIZE = 32  # Reduced batch size to handle larger sequences
+    EPOCHS = 50
+    LEARNING_RATE = 0.001
     MIN_SAMPLES = 120
-    MAX_FRAMES = 48    # Increased for better temporal patterns
-    N_MFCC = 24        # Increased for better feature resolution
+    # Calculate frames for 5 seconds: 5 sec * 22050 Hz / 256 hop_length ≈ 431
+    MAX_FRAMES = 431  # Updated from 48 to ~431 frames (5 seconds)
+    N_MFCC = 24
     SAMPLE_RATE = 22050
     N_FFT = 1024
     HOP_LENGTH = 256
-
+    
 # ======================
 # Setup Reproducibility
 # ======================

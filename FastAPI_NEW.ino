@@ -20,9 +20,9 @@ const char* password = "MwHUYQoKrYPVV5t4kM";
 // Server Config
 const char* aiServer = "10.89.195.233:5000";  // Add the port number
 const char* predictEndpoint = "/analyze-cry";
-// Comment these out for now until you have them set up
-// const char* watchyIP = "192.168.x.x";
-// const char* appServer = "192.168.x.x";
+// Update these with your actual device IPs when ready
+const char* watchyIP = "192.168.1.X";  // Replace X with your Watchy's IP last octet
+const char* appServer = "192.168.1.Y"; // Replace Y with your app server's IP last octet
 
 ESP8266WebServer server(80);
 int16_t audioBuffer[BUFFER_SIZE];
@@ -127,15 +127,25 @@ void storeAndNotify(String reason) {
     Serial.println(reason);
   }
   
-  // For now, just log it
-  // Uncomment these when you have watchy and app servers set up
-  /*
   // Notify Watchy
   if (watchyIP && strlen(watchyIP) > 0) {
     WiFiClient watchyClient;
     HTTPClient watchyHttp;
-    watchyHttp.begin(watchyClient, String("http://") + watchyIP + "/vibrate");
-    watchyHttp.POST("");
+    String watchyUrl = String("http://") + watchyIP + "/vibrate";
+    
+    if (debugMode) {
+      Serial.print("Notifying Watchy at: ");
+      Serial.println(watchyUrl);
+    }
+    
+    watchyHttp.begin(watchyClient, watchyUrl);
+    int httpCode = watchyHttp.POST("");
+    
+    if (debugMode) {
+      Serial.print("Watchy notification result: ");
+      Serial.println(httpCode);
+    }
+    
     watchyHttp.end();
   }
   
@@ -143,18 +153,29 @@ void storeAndNotify(String reason) {
   if (appServer && strlen(appServer) > 0) {
     WiFiClient appClient;
     HTTPClient appHttp;
-    appHttp.begin(appClient, String("http://") + appServer + "/baby-alert");
+    String appUrl = String("http://") + appServer + "/baby-alert";
+    
+    if (debugMode) {
+      Serial.print("Notifying App at: ");
+      Serial.println(appUrl);
+    }
     
     DynamicJsonDocument doc(128);
     doc["reason"] = reason;
     String json;
     serializeJson(doc, json);
     
+    appHttp.begin(appClient, appUrl);
     appHttp.addHeader("Content-Type", "application/json");
-    appHttp.POST(json);
+    int httpCode = appHttp.POST(json);
+    
+    if (debugMode) {
+      Serial.print("App notification result: ");
+      Serial.println(httpCode);
+    }
+    
     appHttp.end();
   }
-  */
 }
 
 void setup() {
