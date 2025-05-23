@@ -28,7 +28,7 @@ tf.keras.mixed_precision.set_global_policy(policy)
 # ======================
 class Config:
     CLASS_LABELS = [
-        'unwell', 'tired', 'hungry', 'others', 'laugh',
+        'unwelltired', 'hungry', 'others', 'laugh',
         'quiet'
     ]
     NUM_CLASSES = len(CLASS_LABELS)
