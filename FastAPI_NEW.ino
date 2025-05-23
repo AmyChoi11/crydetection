@@ -16,6 +16,7 @@ const char* ssid = "Livebox-D510";
 const char* password = "MwHUYQoKrYPVV5t4kM";
 
 // Server Config
+<<<<<<< HEAD
 const char* aiServer = "10.89.195.233:5000";  // Add the port number
 const char* predictEndpoint = "/analyze-cry";
 // Comment these out for now until you have them set up
@@ -156,10 +157,24 @@ void setup() {
   
   // Init I2S for audio
   Serial.println("Initializing I2S...");
+=======
+const char* aiServer = "AI_SERVER_IP:5000";
+const char* watchyIP = "WATCHY_IP";
+const char* appServer = "APP_SERVER_IP";
+
+ESP8266WebServer server(80);
+int16_t audioBuffer[BUFFER_SIZE];
+
+void setup() {
+  Serial.begin(115200);
+  
+  // Init I2S for audio
+>>>>>>> 4f34036f6bfe6ef3025fdf355f61b4a86bcaa79b
   I2S.setSckPin(D5);
   I2S.setDataPin(D7);
   if(!I2S.begin(SAMPLE_RATE, SAMPLE_BITS)) {
     Serial.println("Failed to init I2S!");
+<<<<<<< HEAD
   } else {
     Serial.println("I2S initialized successfully");
   }
@@ -201,6 +216,17 @@ void setup() {
   // Test connection to AI server
   Serial.println("Testing connection to AI server...");
   testConnection();
+=======
+  }
+
+  // Connect WiFi
+  WiFi.begin(ssid, password);
+  while(WiFi.status() != WL_CONNECTED) delay(500);
+  
+  // API Endpoints
+  server.on("/trigger-recording", HTTP_POST, handleRecording);
+  server.begin();
+>>>>>>> 4f34036f6bfe6ef3025fdf355f61b4a86bcaa79b
 }
 
 void loop() {
@@ -208,6 +234,7 @@ void loop() {
   monitorAudio();
 }
 
+<<<<<<< HEAD
 void processRecording() {
   if (debugMode) Serial.println("Processing recording...");
   
@@ -230,11 +257,16 @@ void processRecording() {
   }
 }
 
+=======
+>>>>>>> 4f34036f6bfe6ef3025fdf355f61b4a86bcaa79b
 void monitorAudio() {
   static unsigned long lastTrigger = 0;
   static bool isRecording = false;
   static size_t recordIndex = 0;
+<<<<<<< HEAD
   static int silenceCounter = 0;
+=======
+>>>>>>> 4f34036f6bfe6ef3025fdf355f61b4a86bcaa79b
   
   // Simple VAD (Voice Activity Detection)
   int16_t sample;
@@ -249,6 +281,7 @@ void monitorAudio() {
        millis() - lastTrigger > 10000) {
       isRecording = true;
       recordIndex = 0;
+<<<<<<< HEAD
       silenceCounter = 0;
       
       if (debugMode) {
@@ -256,10 +289,13 @@ void monitorAudio() {
         Serial.print("Volume level: ");
         Serial.println(instantVolume);
       }
+=======
+>>>>>>> 4f34036f6bfe6ef3025fdf355f61b4a86bcaa79b
     }
     
     if(isRecording) {
       audioBuffer[recordIndex++] = sample;
+<<<<<<< HEAD
       
       // Debugging info
       if (debugMode && recordIndex % 8000 == 0) {
@@ -270,10 +306,64 @@ void monitorAudio() {
       
       if(recordIndex >= BUFFER_SIZE) {
         if (debugMode) Serial.println("Buffer full, processing recording");
+=======
+      if(recordIndex >= BUFFER_SIZE) {
+>>>>>>> 4f34036f6bfe6ef3025fdf355f61b4a86bcaa79b
         processRecording();
         isRecording = false;
         lastTrigger = millis();
       }
     }
   }
+<<<<<<< HEAD
+=======
+}
+
+void processRecording() {
+  // Send to AI Model
+  WiFiClient client;
+  HTTPClient http;
+  
+  http.begin(client, String("http://") + aiServer + "/analyze-cry");
+  http.addHeader("Content-Type", "application/octet-stream");
+  
+  // Send raw audio
+  int httpCode = http.POST((uint8_t*)audioBuffer, BUFFER_SIZE * 2);
+  
+  if(httpCode == HTTP_CODE_OK) {
+    String payload = http.getString();
+    DynamicJsonDocument doc(256);
+    deserializeJson(doc, payload);
+    
+    String reason = doc["reason"];
+    storeAndNotify(reason);
+  }
+  http.end();
+}
+
+void storeAndNotify(String reason) {
+  // Store in local memory
+  // (For persistent storage, use EEPROM or SPIFFS)
+  
+  // Notify Watchy
+  WiFiClient watchyClient;
+  HTTPClient watchyHttp;
+  watchyHttp.begin(watchyClient, String("http://") + watchyIP + "/vibrate");
+  watchyHttp.POST("");
+  watchyHttp.end();
+  
+  // Notify App
+  WiFiClient appClient;
+  HTTPClient appHttp;
+  appHttp.begin(appClient, String("http://") + appServer + "/baby-alert");
+  
+  DynamicJsonDocument doc(128);
+  doc["reason"] = reason;
+  String json;
+  serializeJson(doc, json);
+  
+  appHttp.addHeader("Content-Type", "application/json");
+  appHttp.POST(json);
+  appHttp.end();
+>>>>>>> 4f34036f6bfe6ef3025fdf355f61b4a86bcaa79b
 }
