@@ -3,7 +3,9 @@
 #include <ESP8266HTTPClient.h>
 #include <WiFiClient.h>
 #include <ArduinoJson.h>
-#include <I2S.h> // For audio recording
+// Use the correct I2S library
+#include <ESP8266Audio.h>
+#include <AudioInputI2S.h>
 
 // Audio Config
 #define SAMPLE_RATE 16000
@@ -16,7 +18,6 @@ const char* ssid = "Livebox-D510";
 const char* password = "MwHUYQoKrYPVV5t4kM";
 
 // Server Config
-<<<<<<< HEAD
 const char* aiServer = "10.89.195.233:5000";  // Add the port number
 const char* predictEndpoint = "/analyze-cry";
 // Comment these out for now until you have them set up
@@ -26,6 +27,9 @@ const char* predictEndpoint = "/analyze-cry";
 ESP8266WebServer server(80);
 int16_t audioBuffer[BUFFER_SIZE];
 bool debugMode = true; // Enable debug messages
+
+// Audio input object
+AudioInputI2S i2sIn;
 
 // Send audio data to AI server
 String sendToAIServer(int16_t* audioData, int dataSize) {
@@ -82,7 +86,9 @@ void handleRecording() {
   // Fill buffer with audio
   int samples = 0;
   while (samples < BUFFER_SIZE) {
-    if (I2S.read(&audioBuffer[samples], sizeof(int16_t))) {
+    // Read audio from I2S
+    size_t bytesRead = i2sIn.read(audioBuffer + samples, sizeof(int16_t));
+    if (bytesRead == sizeof(int16_t)) {
       samples++;
       if (samples % 1000 == 0 && debugMode) {
         Serial.print("Recording... ");
@@ -157,27 +163,13 @@ void setup() {
   
   // Init I2S for audio
   Serial.println("Initializing I2S...");
-=======
-const char* aiServer = "AI_SERVER_IP:5000";
-const char* watchyIP = "WATCHY_IP";
-const char* appServer = "APP_SERVER_IP";
-
-ESP8266WebServer server(80);
-int16_t audioBuffer[BUFFER_SIZE];
-
-void setup() {
-  Serial.begin(115200);
+  i2sIn.begin(SAMPLE_RATE, I2S_PHILIPS_MODE, I2S_BITS_PER_SAMPLE_16BIT, I2S_MONO);
   
-  // Init I2S for audio
->>>>>>> 4f34036f6bfe6ef3025fdf355f61b4a86bcaa79b
-  I2S.setSckPin(D5);
-  I2S.setDataPin(D7);
-  if(!I2S.begin(SAMPLE_RATE, SAMPLE_BITS)) {
-    Serial.println("Failed to init I2S!");
-<<<<<<< HEAD
-  } else {
-    Serial.println("I2S initialized successfully");
-  }
+  // Set I2S pins
+  i2sIn.setPin(I2S_PIN_BCLK, D5);
+  i2sIn.setPin(I2S_PIN_DATA, D7);
+  
+  Serial.println("I2S initialized successfully");
 
   // Connect WiFi
   Serial.print("Connecting to WiFi ");
@@ -216,17 +208,6 @@ void setup() {
   // Test connection to AI server
   Serial.println("Testing connection to AI server...");
   testConnection();
-=======
-  }
-
-  // Connect WiFi
-  WiFi.begin(ssid, password);
-  while(WiFi.status() != WL_CONNECTED) delay(500);
-  
-  // API Endpoints
-  server.on("/trigger-recording", HTTP_POST, handleRecording);
-  server.begin();
->>>>>>> 4f34036f6bfe6ef3025fdf355f61b4a86bcaa79b
 }
 
 void loop() {
@@ -234,7 +215,6 @@ void loop() {
   monitorAudio();
 }
 
-<<<<<<< HEAD
 void processRecording() {
   if (debugMode) Serial.println("Processing recording...");
   
@@ -257,22 +237,20 @@ void processRecording() {
   }
 }
 
-=======
->>>>>>> 4f34036f6bfe6ef3025fdf355f61b4a86bcaa79b
 void monitorAudio() {
   static unsigned long lastTrigger = 0;
   static bool isRecording = false;
   static size_t recordIndex = 0;
-<<<<<<< HEAD
   static int silenceCounter = 0;
-=======
->>>>>>> 4f34036f6bfe6ef3025fdf355f61b4a86bcaa79b
   
   // Simple VAD (Voice Activity Detection)
-  int16_t sample;
+  int16_t sample = 0;
   static float avgVolume = 0;
   
-  if(I2S.read(&sample, sizeof(sample))) {
+  // Read audio from I2S
+  size_t bytesRead = i2sIn.read(&sample, sizeof(int16_t));
+  
+  if(bytesRead == sizeof(int16_t)) {
     float instantVolume = abs(sample);
     avgVolume = 0.95 * avgVolume + 0.05 * instantVolume;
     
@@ -281,7 +259,6 @@ void monitorAudio() {
        millis() - lastTrigger > 10000) {
       isRecording = true;
       recordIndex = 0;
-<<<<<<< HEAD
       silenceCounter = 0;
       
       if (debugMode) {
@@ -289,13 +266,10 @@ void monitorAudio() {
         Serial.print("Volume level: ");
         Serial.println(instantVolume);
       }
-=======
->>>>>>> 4f34036f6bfe6ef3025fdf355f61b4a86bcaa79b
     }
     
     if(isRecording) {
       audioBuffer[recordIndex++] = sample;
-<<<<<<< HEAD
       
       // Debugging info
       if (debugMode && recordIndex % 8000 == 0) {
@@ -306,64 +280,10 @@ void monitorAudio() {
       
       if(recordIndex >= BUFFER_SIZE) {
         if (debugMode) Serial.println("Buffer full, processing recording");
-=======
-      if(recordIndex >= BUFFER_SIZE) {
->>>>>>> 4f34036f6bfe6ef3025fdf355f61b4a86bcaa79b
         processRecording();
         isRecording = false;
         lastTrigger = millis();
       }
     }
   }
-<<<<<<< HEAD
-=======
-}
-
-void processRecording() {
-  // Send to AI Model
-  WiFiClient client;
-  HTTPClient http;
-  
-  http.begin(client, String("http://") + aiServer + "/analyze-cry");
-  http.addHeader("Content-Type", "application/octet-stream");
-  
-  // Send raw audio
-  int httpCode = http.POST((uint8_t*)audioBuffer, BUFFER_SIZE * 2);
-  
-  if(httpCode == HTTP_CODE_OK) {
-    String payload = http.getString();
-    DynamicJsonDocument doc(256);
-    deserializeJson(doc, payload);
-    
-    String reason = doc["reason"];
-    storeAndNotify(reason);
-  }
-  http.end();
-}
-
-void storeAndNotify(String reason) {
-  // Store in local memory
-  // (For persistent storage, use EEPROM or SPIFFS)
-  
-  // Notify Watchy
-  WiFiClient watchyClient;
-  HTTPClient watchyHttp;
-  watchyHttp.begin(watchyClient, String("http://") + watchyIP + "/vibrate");
-  watchyHttp.POST("");
-  watchyHttp.end();
-  
-  // Notify App
-  WiFiClient appClient;
-  HTTPClient appHttp;
-  appHttp.begin(appClient, String("http://") + appServer + "/baby-alert");
-  
-  DynamicJsonDocument doc(128);
-  doc["reason"] = reason;
-  String json;
-  serializeJson(doc, json);
-  
-  appHttp.addHeader("Content-Type", "application/json");
-  appHttp.POST(json);
-  appHttp.end();
->>>>>>> 4f34036f6bfe6ef3025fdf355f61b4a86bcaa79b
 }
