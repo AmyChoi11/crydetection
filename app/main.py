@@ -1,3 +1,6 @@
+from nicegui import ui
+ui.label('Hello NiceGUI!')
+
 import numpy as np
 import librosa
 import tensorflow as tf
@@ -249,3 +252,5 @@ async def test_endpoint():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=5000)
+
+ui.run()
