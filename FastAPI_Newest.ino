@@ -4,9 +4,7 @@
 #include <WiFiClient.h>
 #include <ArduinoJson.h>
 #include <I2S.h>
-#include <esp_task_wdt.h>
-#include <Preferences.h>
-Preferences preferences;
+
 // Audio Configuration
 #define SAMPLE_RATE 16000
 #define SAMPLE_BITS 16
@@ -14,7 +12,6 @@ Preferences preferences;
 #define BUFFER_SIZE (SAMPLE_RATE * CLIP_DURATION)
 #define VOLUME_THRESHOLD 3.0 // Multiplier of average volume
 #define MIN_TRIGGER_INTERVAL 10000 // 10 seconds cooldown
-#define WDT_TIMEOUT 30  // 30 second timeout
 
 // Network Configuration
 const char* ssid = "Livebox-D510";
@@ -23,10 +20,10 @@ const char* password = "MwHUYQoKrYPVV5t4kM";
 // AI Server Configuration (Updated with your endpoint)
 const char* aiServer = "10.89.195.233";
 const int aiPort = 5000;
-const String aiEndpoint = "/analyze-cry"; // From your FastAPI docs
+const String aiEndpoint = "/analyze_audio"; // From your FastAPI docs
 
 // Device Configuration
-const char* watchyIP = "192.168.4.1"; // Update with your Watchy's IP
+const char* watchyIP = "192.168.1.100"; // Update with your Watchy's IP
 const char* appServer = "APP_SERVER_IP"; // Update with your app server IP
 
 ESP8266WebServer localServer(80);
@@ -34,8 +31,7 @@ int16_t audioBuffer[BUFFER_SIZE];
 
 void setup() {
   Serial.begin(115200);
-  esp_task_wdt_init(WDT_TIMEOUT, true); // Enable panic so ESP32 restarts
-  esp_task_wdt_add(NULL); // Add current thread to WDT watch
+  
   // Initialize I2S for audio recording
   I2S.setSckPin(D5);
   I2S.setDataPin(D7);
@@ -52,14 +48,7 @@ void setup() {
     Serial.print(".");
   }
   Serial.println("\nConnected! IP: " + WiFi.localIP().toString());
-
-  preferences.begin("crydetect", false);
-  String savedWatchyIP = preferences.getString("watchyIP", "");
-  if (savedWatchyIP.length() > 0) {
-    watchyIP = savedWatchyIP.c_str();
-    Serial.println("Loaded saved Watchy IP: " + savedWatchyIP);
-  }
-  preferences.putString("watchyIP", String(watchyIP));
+  
   // Setup local API endpoint
   localServer.on("/trigger-recording", HTTP_POST, handleRecording);
   localServer.begin();
@@ -68,7 +57,6 @@ void setup() {
 void loop() {
   localServer.handleClient();
   monitorAudio();
-  esp_task_wdt_reset();
 }
 
 void monitorAudio() {
@@ -135,28 +123,33 @@ void processRecording() {
 }
 
 void notifyDevices(String reason) {
-  // 1. Notify Watchy to vibrate
-  HTTPClient watchyHttp;
-  watchyHttp.begin("http://" + String(watchyIP) + "/vibrate");
-  int watchyCode = watchyHttp.POST("");
-  Serial.printf("Watchy notification: %d\n", watchyCode);
-  watchyHttp.end();
-  
-  // 2. Send detailed reason to app server
-  HTTPClient appHttp;
-  appHttp.begin("http://" + String(appServer) + "/baby-alert");
-  
-  DynamicJsonDocument doc(128);
-  doc["reason"] = reason;
-  doc["timestamp"] = millis();
-  
-  String json;
-  serializeJson(doc, json);
-  
-  appHttp.addHeader("Content-Type", "application/json");
-  int appCode = appHttp.POST(json);
-  Serial.printf("App notification: %d\n", appCode);
-  appHttp.end();
+  // Only notify for specific reasons
+  if (reason == "Unwell" || reason == "Cry" || reason == "Laugh") {
+    // 1. Notify Watchy to vibrate (with reason for pattern selection)
+    HTTPClient watchyHttp;
+    String vibrationEndpoint = "http://" + String(watchyIP) + "/vibrate?reason=" + reason;
+    watchyHttp.begin(vibrationEndpoint);
+    int watchyCode = watchyHttp.POST("");
+    Serial.printf("Watchy notification: %d\n", watchyCode);
+    watchyHttp.end();
+    
+    // 2. Send detailed reason to app server
+    HTTPClient appHttp;
+    appHttp.begin("http://" + String(appServer) + "/baby-alert");
+    
+    DynamicJsonDocument doc(128);
+    doc["reason"] = reason;
+    doc["timestamp"] = millis();
+    
+    String json;
+    serializeJson(doc, json);
+    
+    appHttp.addHeader("Content-Type", "application/json");
+    int appCode = appHttp.POST(json);
+    Serial.printf("App notification: %d\n", appCode);
+    appHttp.end();
+  }
+  // No action for "Sleeping", "Tired", or "Silence"
 }
 
 void handleRecording() {
