@@ -1,5 +1,6 @@
 import numpy as np
 import tensorflow as tf
+import librosa
 from tensorflow.keras.layers import InputLayer, BatchNormalization, Conv2D, MaxPooling2D, Dropout, GlobalAveragePooling2D, Dense
 
 # ------------ 确定性设置 ------------
@@ -9,11 +10,13 @@ tf.random.set_seed(seed)
 
 # ------------ 配置类 ------------
 class Config:
-    CLASS_LABELS = ['unwell', 'tired', 'hungry', 'others', 'laugh',
-        'quiet']
+    CLASS_LABELS = ['Unwell', 'Sleeping', 'Cry', 'Laugh', 'Tired', 'Silence']
     NUM_CLASSES = len(CLASS_LABELS)
     MAX_FRAMES = 50  # 必须与训练时相同！
     N_MFCC = 10      # 必须与训练时相同！
+    SAMPLE_RATE = 22050  # 采样率
+    HOP_LENGTH = 256  # 跳跃长度
+    N_FFT = 512      # FFT窗口大小
 
 # ------------ 模型架构 (与训练一致) ------------
 def build_model():
@@ -31,16 +34,31 @@ def build_model():
         
         Dense(Config.NUM_CLASSES, activation='softmax')
     ])
-    model.load_weights('best_model.keras')  # 确保使用正确权重文件
+    model.load_weights('newest_model.keras')  # 确保使用正确权重文件
     return model
 
 # ------------ 数据预处理 ------------
 def load_and_preprocess(file_path):
-    mfcc = np.load(file_path)
+    # 使用librosa加载WAV文件
+    print(f"Loading audio file: {file_path}")
+    y, sr = librosa.load(file_path, sr=Config.SAMPLE_RATE)
     
-    # 统一维度处理
-    if mfcc.ndim == 2:
-        mfcc = np.expand_dims(mfcc, axis=0)
+    # 提取MFCC特征
+    print(f"Extracting MFCC features, audio shape: {y.shape}")
+    mfcc = librosa.feature.mfcc(
+        y=y,
+        sr=Config.SAMPLE_RATE,
+        n_mfcc=Config.N_MFCC,
+        n_fft=Config.N_FFT,
+        hop_length=Config.HOP_LENGTH
+    )
+    
+    # MFCC转置以匹配模型输入格式 (frames, features)
+    mfcc = mfcc.T
+    print(f"MFCC shape after extraction: {mfcc.shape}")
+    
+    # 添加批次维度
+    mfcc = np.expand_dims(mfcc, axis=0)
     
     # 时间轴对齐
     if mfcc.shape[1] < Config.MAX_FRAMES:
@@ -51,6 +69,7 @@ def load_and_preprocess(file_path):
     
     # 添加通道维度
     mfcc = np.expand_dims(mfcc, axis=-1)
+    print(f"MFCC final shape: {mfcc.shape}")
     
     # 标准化
     mean = np.load('mean.npy')
@@ -60,7 +79,7 @@ def load_and_preprocess(file_path):
 # ------------ 执行预测 ------------
 if __name__ == "__main__":
     # 预处理
-    data = load_and_preprocess(r"D:\ISDN2002\testing\output\Audio_mfcc.npy")
+    data = load_and_preprocess(r"D:\ISDN2002\archive\belly_pain\69BDA5D6-0276-4462-9BF7-951799563728-1436936185-1.1-m-26-bp.wav")
     
     # 加载模型
     model = build_model()

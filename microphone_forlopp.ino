@@ -2,123 +2,267 @@
 #include <HTTPClient.h>
 #include <Arduino.h>
 
-const int micPin = 34;           // Microphone analog pin
-const int sampleRate = 8000;      // 8kHz sample rate
-const int threshold = 500;        // Amplitude threshold
-const int recordingDuration = 5;  // 5-second clips
-const int totalSamples = sampleRate * recordingDuration;
-
-// WiFi credentials
+// Network credentials
 const char* ssid = "SmarTone_HBB_4022";
 const char* password = "5W5AABFB25";
 
-// FastAPI server
-const char* serverUrl = "http://127.0.0.1:8000/upload";
+// Server details
+const char* serverUrl = "http://10.89.195.233:5000/analyze-cry";  // Replace with your PC's IP
 
-int16_t audioBuffer[totalSamples];
+
+// Audio recording configuration
+const int micPin = 34;           // Microphone pin
+const int statusLED = 2;         // Built-in LED pin
+const int sampleRate = 8000;     // Sample rate in Hz
+const int threshold = 500;       // Audio amplitude threshold for cry detection
+const int recordingDuration = 5; // Duration in seconds
+const int samplesPerSegment = recordingDuration * sampleRate; // Total samples to record
+const int bufferSize = 1024;     // Samples per buffer
+const int cooldownPeriod = 10;   // Time between detections in seconds
+
+// Variables
+int16_t audioBuffer[bufferSize]; // Buffer for audio samples
+int16_t recordingBuffer[samplesPerSegment]; // Full recording buffer
+unsigned long lastRecordingTime = 0;
 bool isRecording = false;
-unsigned long recordingStartTime = 0;
-int sampleCount = 0;
+int recordingIndex = 0;
+int noiseLevel = 0;
+int consecutiveHighSamples = 0;
+const int minHighSamples = 20; // Minimum number of samples above threshold to trigger
 
 void setup() {
+  // Initialize serial communication
   Serial.begin(115200);
-  analogReadResolution(12);
-  analogSetAttenuation(ADC_11db);
   
+  // Configure pins
+  pinMode(statusLED, OUTPUT);
+  digitalWrite(statusLED, LOW);
+  
+  // Connect to WiFi
   WiFi.begin(ssid, password);
+  Serial.print("Connecting to WiFi");
+  
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
+    digitalWrite(statusLED, !digitalRead(statusLED)); // Blink LED while connecting
   }
+  
+  // Connected to WiFi
   Serial.println("\nWiFi connected");
+  Serial.println("IP address: " + WiFi.localIP().toString());
+  digitalWrite(statusLED, HIGH);
+  
+  // ADC settings for better audio quality
+  analogSetWidth(12);        // 12-bit resolution for ADC
+  analogSetAttenuation(ADC_11db); // Set attenuation for higher voltage range
+  
+  // Calculate background noise level
+  calibrateMicrophone();
 }
 
 void loop() {
-  int sample = analogRead(micPin) - 2048;  // Center around 0
+  // Check WiFi connection
+  ensureWifiConnection();
   
-  // Trigger recording if threshold crossed and not already recording
-  if (abs(sample) > threshold && !isRecording) {
-    isRecording = true;
-    sampleCount = 0;
-    recordingStartTime = millis();
-    Serial.println("Threshold exceeded - starting recording");
+  // If not recording, check for cry detection
+  if (!isRecording) {
+    detectCry();
+  } else {
+    // Continue recording
+    recordAudio();
   }
-
-  // If recording, collect samples
-  if (isRecording && sampleCount < totalSamples) {
-    audioBuffer[sampleCount] = sample;
-    sampleCount++;
-    
-    // If buffer full, send to server
-    if (sampleCount >= totalSamples) {
-      isRecording = false;
-      Serial.println("Recording complete - sending to server");
-      sendAudioToServer();
-    }
-  }
-
-  // Fixed delay to maintain sample rate
-  delayMicroseconds(1000000 / sampleRate);
 }
 
-void sendAudioToServer() {
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("WiFi disconnected");
+void detectCry() {
+  // Check if cooldown period has passed
+  if (millis() - lastRecordingTime < cooldownPeriod * 1000) {
     return;
   }
-
-  HTTPClient http;
-  http.begin(serverUrl);
   
-  // Create WAV header
-  byte wavHeader[44];
-  createWavHeader(wavHeader, totalSamples);
-
-  // Combine header and audio data
-  uint8_t* postData = (uint8_t*)malloc(44 + totalSamples * 2);
-  memcpy(postData, wavHeader, 44);
-  memcpy(postData + 44, audioBuffer, totalSamples * 2);
-
-  // Send POST request
-  int httpCode = http.POST(postData, 44 + totalSamples * 2);
+  // Read current sample
+  int sample = abs(analogRead(micPin) - 2048); // Convert to signed value centered at 0
   
-  if (httpCode > 0) {
-    Serial.printf("Upload successful, response: %d\n", httpCode);
+  // Check if above threshold
+  if (sample > threshold) {
+    consecutiveHighSamples++;
+    
+    // Visual feedback
+    if (consecutiveHighSamples % 5 == 0) {
+      digitalWrite(statusLED, !digitalRead(statusLED));
+    }
+    
+    // If enough consecutive samples above threshold, start recording
+    if (consecutiveHighSamples >= minHighSamples) {
+      Serial.println("Cry detected! Starting recording...");
+      startRecording();
+      consecutiveHighSamples = 0;
+    }
   } else {
-    Serial.printf("Upload failed, error: %s\n", http.errorToString(httpCode).c_str());
+    // Reset counter if sample is below threshold
+    consecutiveHighSamples = 0;
+    digitalWrite(statusLED, HIGH); // Keep LED on when idle
   }
-
-  http.end();
-  free(postData);
 }
 
-void createWavHeader(byte* header, int dataSize) {
-  // RIFF header
-  header[0] = 'R'; header[1] = 'I'; header[2] = 'F'; header[3] = 'F';
-  unsigned int fileSize = dataSize * 2 + 36;
-  header[4] = fileSize & 0xFF;
-  header[5] = (fileSize >> 8) & 0xFF;
-  header[6] = (fileSize >> 16) & 0xFF;
-  header[7] = (fileSize >> 24) & 0xFF;
-  header[8] = 'W'; header[9] = 'A'; header[10] = 'V'; header[11] = 'E';
+void startRecording() {
+  isRecording = true;
+  recordingIndex = 0;
   
-  // fmt chunk
-  header[12] = 'f'; header[13] = 'm'; header[14] = 't'; header[15] = ' ';
-  header[16] = 16; header[17] = 0; header[18] = 0; header[19] = 0;
-  header[20] = 1; header[21] = 0;  // PCM format
-  header[22] = 1; header[23] = 0;  // Mono
-  header[24] = 0x40; header[25] = 0x1F;  // 8000 Hz
-  header[26] = 0x00; header[27] = 0x00;
-  header[28] = 0x80; header[29] = 0x3E;  // Byte rate
-  header[30] = 0x00; header[31] = 0x00;
-  header[32] = 2; header[33] = 0;       // Block align
-  header[34] = 16; header[35] = 0;      // Bits per sample
+  // Clear recording buffer
+  memset(recordingBuffer, 0, samplesPerSegment * sizeof(int16_t));
   
-  // data chunk
-  header[36] = 'd'; header[37] = 'a'; header[38] = 't'; header[39] = 'a';
-  unsigned int chunkSize = dataSize * 2;
-  header[40] = chunkSize & 0xFF;
-  header[41] = (chunkSize >> 8) & 0xFF;
-  header[42] = (chunkSize >> 16) & 0xFF;
-  header[43] = (chunkSize >> 24) & 0xFF;
+  // Visual indication that recording has started
+  digitalWrite(statusLED, LOW);
+}
+
+void recordAudio() {
+  // Calculate how many samples we can read in this loop
+  int samplesToRead = min(bufferSize, samplesPerSegment - recordingIndex);
+  
+  if (samplesToRead <= 0) {
+    // Recording finished
+    isRecording = false;
+    lastRecordingTime = millis();
+    
+    Serial.println("Recording complete. Sending to server...");
+    digitalWrite(statusLED, HIGH); // LED on while processing
+    
+    // Send recording to server
+    sendRecording();
+    
+    return;
+  }
+  
+  // Read samples into buffer
+  for (int i = 0; i < samplesToRead; i++) {
+    // Read from ADC and convert to signed 16-bit
+    int16_t sample = analogRead(micPin) - 2048; // Center at 0
+    sample = sample << 4; // Scale to 16-bit range
+    
+    // Store in recording buffer
+    recordingBuffer[recordingIndex++] = sample;
+    
+    // Brief delay to maintain sample rate
+    delayMicroseconds(1000000 / sampleRate);
+  }
+  
+  // Visual feedback
+  if (recordingIndex % (sampleRate / 2) == 0) { // Blink twice per second
+    digitalWrite(statusLED, !digitalRead(statusLED));
+  }
+}
+
+void sendRecording() {
+  // Ensure WiFi is connected
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi not connected. Cannot send recording.");
+    return;
+  }
+  
+  HTTPClient http;
+  
+  // Configure HTTP client
+  http.begin(serverUrl);
+  http.addHeader("Content-Type", "application/octet-stream");
+  
+  // Visual indication - rapid blinking during transmission
+  for (int i = 0; i < 5; i++) {
+    digitalWrite(statusLED, HIGH);
+    delay(50);
+    digitalWrite(statusLED, LOW);
+    delay(50);
+  }
+  
+  // Send the recording as raw bytes
+  int httpResponseCode = http.POST((uint8_t*)recordingBuffer, samplesPerSegment * sizeof(int16_t));
+  
+  if (httpResponseCode > 0) {
+    String response = http.getString();
+    Serial.println("HTTP Response code: " + String(httpResponseCode));
+    Serial.println("Response: " + response);
+    
+    // Success indication - solid LED for 1 second
+    digitalWrite(statusLED, HIGH);
+    delay(1000);
+  } else {
+    Serial.println("Error sending recording: " + String(httpResponseCode));
+    
+    // Error indication - three quick blinks
+    for (int i = 0; i < 3; i++) {
+      digitalWrite(statusLED, HIGH);
+      delay(100);
+      digitalWrite(statusLED, LOW);
+      delay(100);
+    }
+  }
+  
+  http.end();
+}
+
+void calibrateMicrophone() {
+  Serial.println("Calibrating microphone...");
+  digitalWrite(statusLED, LOW);
+  
+  // Sample background noise level
+  long sum = 0;
+  const int numSamples = 1000;
+  
+  for (int i = 0; i < numSamples; i++) {
+    int sample = abs(analogRead(micPin) - 2048);
+    sum += sample;
+    delayMicroseconds(1000);
+  }
+  
+  noiseLevel = sum / numSamples;
+  
+  Serial.println("Microphone calibration complete");
+  Serial.println("Background noise level: " + String(noiseLevel));
+  
+  // Adjust threshold based on noise level (optional)
+  // threshold = max(threshold, noiseLevel * 3);
+  
+  digitalWrite(statusLED, HIGH);
+}
+
+void ensureWifiConnection() {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi connection lost. Reconnecting...");
+    
+    // Store LED state
+    int ledState = digitalRead(statusLED);
+    
+    // Blink rapidly during reconnection
+    for (int i = 0; i < 10; i++) {
+      digitalWrite(statusLED, HIGH);
+      delay(50);
+      digitalWrite(statusLED, LOW);
+      delay(50);
+    }
+    
+    // Try to reconnect
+    WiFi.begin(ssid, password);
+    
+    int attempts = 0;
+    while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+      delay(500);
+      Serial.print(".");
+      attempts++;
+    }
+    
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.println("WiFi reconnected");
+      // Restore LED
+      digitalWrite(statusLED, ledState);
+    } else {
+      Serial.println("Failed to reconnect WiFi");
+      // Error indication
+      for (int i = 0; i < 3; i++) {
+        digitalWrite(statusLED, HIGH);
+        delay(300);
+        digitalWrite(statusLED, LOW);
+        delay(300);
+      }
+    }
+  }
 }

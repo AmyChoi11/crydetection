@@ -1,0 +1,8 @@
+{
+  "threshold": 500,
+  "notification_cooldown": 60,
+  "confidence_threshold": 0.7,
+  "watchy_ip": "watchy.local",
+  "notify_parent": true,
+  "notify_watchy": true
+}
