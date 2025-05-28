@@ -4,3 +4,5 @@ tensorflow==2.12.0
 numpy==1.23.5
 python-multipart==0.0.6
 pydantic==1.10.7
+sounddevice>=0.4.5
+websockets>=10.4  # For WebSocket support
