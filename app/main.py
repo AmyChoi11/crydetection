@@ -75,7 +75,24 @@ class Config:
     DETECTION_THRESHOLD = 500  # Amplitude threshold for cry detection
     NOTIFICATION_COOLDOWN = 60  # Seconds between notifications
     CONFIDENCE_THRESHOLD = 0.7  # Minimum confidence to trigger notification
+# Add these near the top of the file with your other global variables
+class_multipliers = {
+    0: 2.1,    
+    1: 2.3,    
+    2: 2.7,    
+    3: 3.9,    
+    4: 1.5,    
+    5: 0.9     
+}
 
+class_thresholds = {
+    "uncomfortable": 0.3,  
+    "sleeping": 0.1,       
+    "crying": 0.3,      
+    "laughing": 0.1,    
+    "tired": 0.5,          
+    "silent": 0.4         
+}
 class ConnectionManager:
     def __init__(self):
         self.active_connections = []
@@ -94,7 +111,7 @@ class ConnectionManager:
             except:
                 pass
 prediction_counters = {label: 0 for label in Config.CLASS_LABELS}
-current_prediction = "silent"
+
 MIN_DETECTION_VOLUME = 2000  # Minimum volume to consider non-ambient noise
 COUNTER_THRESHOLD = 3  # Number of consecutive detections needed
 # Create an instance of the connection manager
@@ -157,6 +174,11 @@ async def load_model():
 async def lifespan(app: FastAPI):
     # Load model
     await load_model()
+    
+    # Load configuration and other startup tasks
+    global config
+    if config is None:
+        config = AppConfiguration()
     
     # List audio devices - will help identify if there's a device issue
     list_audio_devices()
@@ -549,6 +571,30 @@ async def ui():
     """Serve the same UI at /ui path for compatibility"""
     return await root()  # Reuse the same HTML from the root handler
 # Update the root() function with this modified HTML
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await manager.connect(websocket)
+    try:
+        # Reset the EMA to be more responsive to new sounds
+        prediction_ema = np.array([0.2, 0.2, 0.2, 0.2, 0.2, 0.0])
+        
+        # Reset all counters
+        for class_name in prediction_counters:
+            prediction_counters[class_name] = 0
+            
+        # Reset current prediction
+        current_prediction = "silent"
+        
+        logger.info("New client connected - reset prediction state")
+        
+        while True:
+            # Keep the connection alive - data is sent via broadcast
+            data = await websocket.receive_text()
+            if data == "ping":
+                await websocket.send_json({"status": "pong"})
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+        logger.info("Client disconnected")
 
 @app.get("/test-microphone")
 async def test_microphone():
@@ -583,23 +629,294 @@ async def test_microphone_levels():
             "non_zero": int(np.count_nonzero(recording))
         }
     }
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    await manager.connect(websocket)
-    try:
-        while True:
-            # Just keep the connection alive - data is sent via broadcast
-            await websocket.receive_text()
-    except WebSocketDisconnect:
-        manager.disconnect(websocket)
 
-@app.on_event("startup")
-async def startup_event():
-    # Load configuration and other startup tasks
-    # ...
-    
-    # List audio devices
-    list_audio_devices()
+
+@app.get("/tune-parameters", response_class=HTMLResponse)
+async def tune_parameters():
+    """Simple UI for tuning the model parameters"""
+    return """
+    <html>
+    <head>
+        <title>Parameter Tuning Tool</title>
+        <style>
+            body { font-family: Arial; margin: 20px; }
+            .slider-container { margin: 15px 0; }
+            .slider { width: 300px; }
+            .param-section { margin-bottom: 30px; border: 1px solid #ddd; padding: 15px; border-radius: 4px; }
+            button { padding: 8px 16px; background: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer; }
+            .result { margin-top: 20px; padding: 10px; background: #f1f1f1; }
+        </style>
+    </head>
+    <body>
+        <h1>Model Parameter Tuning Tool</h1>
+        
+        <div class="param-section">
+            <h2>Class Multipliers</h2>
+            <div class="slider-container">
+                <label>Uncomfortable: <span id="uncomfortableValue">2.1</span></label>
+                <input type="range" class="slider" id="uncomfortable" min="0.5" max="4" step="0.1" value="2.1">
+            </div>
+            <div class="slider-container">
+                <label>Sleeping: <span id="sleepingValue">2.3</span></label>
+                <input type="range" class="slider" id="sleeping" min="0.5" max="4" step="0.1" value="2.3">
+            </div>
+            <div class="slider-container">
+                <label>Crying: <span id="cryingValue">2.7</span></label>
+                <input type="range" class="slider" id="crying" min="0.5" max="4" step="0.1" value="2.7">
+            </div>
+            <div class="slider-container">
+                <label>Laughing: <span id="laughingValue">3.9</span></label>
+                <input type="range" class="slider" id="laughing" min="0.5" max="6" step="0.1" value="3.9">
+            </div>
+            <div class="slider-container">
+                <label>Tired: <span id="tiredValue">1.5</span></label>
+                <input type="range" class="slider" id="tired" min="0.5" max="4" step="0.1" value="1.5">
+            </div>
+            <div class="slider-container">
+                <label>Silent: <span id="silentValue">0.9</span></label>
+                <input type="range" class="slider" id="silent" min="0.1" max="2" step="0.1" value="0.9">
+            </div>
+        </div>
+        
+        <div class="param-section">
+            <h2>Class Thresholds</h2>
+            <div class="slider-container">
+                <label>Uncomfortable Threshold: <span id="uncomfortableThresholdValue">0.3</span></label>
+                <input type="range" class="slider" id="uncomfortableThreshold" min="0.1" max="0.9" step="0.05" value="0.3">
+            </div>
+            <div class="slider-container">
+                <label>Sleeping Threshold: <span id="sleepingThresholdValue">0.1</span></label>
+                <input type="range" class="slider" id="sleepingThreshold" min="0.05" max="0.5" step="0.05" value="0.1">
+            </div>
+            <div class="slider-container">
+                <label>Crying Threshold: <span id="cryingThresholdValue">0.3</span></label>
+                <input type="range" class="slider" id="cryingThreshold" min="0.1" max="0.9" step="0.05" value="0.3">
+            </div>
+            <div class="slider-container">
+                <label>Laughing Threshold: <span id="laughingThresholdValue">0.1</span></label>
+                <input type="range" class="slider" id="laughingThreshold" min="0.05" max="0.5" step="0.05" value="0.1">
+            </div>
+            <div class="slider-container">
+                <label>Tired Threshold: <span id="tiredThresholdValue">0.5</span></label>
+                <input type="range" class="slider" id="tiredThreshold" min="0.1" max="0.9" step="0.05" value="0.5">
+            </div>
+            <div class="slider-container">
+                <label>Silent Threshold: <span id="silentThresholdValue">0.4</span></label>
+                <input type="range" class="slider" id="silentThreshold" min="0.1" max="0.9" step="0.05" value="0.4">
+            </div>
+        </div>
+        <button type="button" id="applyButton">Apply Parameters</button>
+        <button type="button" id="randomButton">Try Random Values</button>
+        <button type="button" id="resetButton">Reset to Defaults</button>
+                
+        <div class="result" id="result">Parameters will be applied to the live model</div>
+        
+        <script>
+        // Add this at the beginning of your script section
+        // Ensure no forms are capturing our button clicks
+            document.addEventListener('DOMContentLoaded', function() {
+                // Find any parent forms and prevent them from submitting
+                const buttons = document.querySelectorAll('#applyButton, #randomButton, #resetButton');
+                buttons.forEach(button => {
+                    const parentForm = button.closest('form');
+                    if (parentForm) {
+                        console.log('Warning: Button inside a form - applying fix');
+                        parentForm.addEventListener('submit', function(e) {
+                            e.preventDefault();
+                            console.log('Form submission prevented');
+                        });
+                    }
+                });
+                
+                console.log('Anti-form-hijacking code initialized');
+            });
+            // Update value displays for sliders
+            document.querySelectorAll('.slider').forEach(slider => {
+                slider.oninput = function() {
+                    document.getElementById(this.id + 'Value').textContent = this.value;
+                }
+            });
+            // Apply parameters
+                document.getElementById('applyButton').onclick = async function(e) {
+                    // Stop default behavior and propagation
+                    if (e) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                    }
+                    
+                    console.log('Apply button clicked');
+                    
+
+                
+                const multipliers = {
+                    0: parseFloat(document.getElementById('uncomfortable').value),
+                    1: parseFloat(document.getElementById('sleeping').value),
+                    2: parseFloat(document.getElementById('crying').value),
+                    3: parseFloat(document.getElementById('laughing').value),
+                    4: parseFloat(document.getElementById('tired').value),
+                    5: parseFloat(document.getElementById('silent').value),
+                };
+                
+                const thresholds = {
+                    "uncomfortable": parseFloat(document.getElementById('uncomfortableThreshold').value),
+                    "sleeping": parseFloat(document.getElementById('sleepingThreshold').value),
+                    "crying": parseFloat(document.getElementById('cryingThreshold').value),
+                    "laughing": parseFloat(document.getElementById('laughingThreshold').value),
+                    "tired": parseFloat(document.getElementById('tiredThreshold').value),
+                    "silent": parseFloat(document.getElementById('silentThreshold').value),
+                };
+                
+                const resultElement = document.getElementById('result');
+                resultElement.innerHTML = 'Sending request...';
+                
+                try {
+                    console.log('Sending fetch request to /update-parameters');
+                    const response = await fetch('/update-parameters', {
+                        method: 'POST',
+                        headers: { 
+                            'Content-Type': 'application/json',
+                            'Accept': 'application/json'
+                        },
+                        body: JSON.stringify({ multipliers, thresholds })
+                    });
+                    
+                    console.log('Response status:', response.status);
+                    
+                    if (!response.ok) {
+                        throw new Error(`Server returned ${response.status}: ${response.statusText}`);
+                    }
+                    
+                    const data = await response.json();
+                    console.log('Response data:', data);
+                    resultElement.innerHTML = '<p>Parameters updated successfully!</p>';
+                } catch (error) {
+                    console.error('Error in fetch:', error);
+                    resultElement.innerHTML = `<p>Error: ${error.message}</p>`;
+                }
+            };
+                        
+            // Random values
+            document.getElementById('randomButton').onclick = function() {
+                document.getElementById('uncomfortable').value = (Math.random() * 3.5 + 0.5).toFixed(1);
+                document.getElementById('uncomfortableValue').textContent = document.getElementById('uncomfortable').value;
+                
+                document.getElementById('sleeping').value = (Math.random() * 3.5 + 0.5).toFixed(1);
+                document.getElementById('sleepingValue').textContent = document.getElementById('sleeping').value;
+                
+                document.getElementById('crying').value = (Math.random() * 3.5 + 0.5).toFixed(1);
+                document.getElementById('cryingValue').textContent = document.getElementById('crying').value;
+                
+                document.getElementById('laughing').value = (Math.random() * 5.5 + 0.5).toFixed(1);
+                document.getElementById('laughingValue').textContent = document.getElementById('laughing').value;
+                
+                document.getElementById('tired').value = (Math.random() * 3.5 + 0.5).toFixed(1);
+                document.getElementById('tiredValue').textContent = document.getElementById('tired').value;
+                
+                document.getElementById('silent').value = (Math.random() * 1.9 + 0.1).toFixed(1);
+                document.getElementById('silentValue').textContent = document.getElementById('silent').value;
+                
+                // Randomize thresholds too
+                const thresholdInputs = ['uncomfortableThreshold', 'sleepingThreshold', 
+                                        'cryingThreshold', 'laughingThreshold', 
+                                        'tiredThreshold', 'silentThreshold'];
+                                        
+                thresholdInputs.forEach(id => {
+                    const value = (Math.random() * 0.8 + 0.1).toFixed(2);
+                    document.getElementById(id).value = value;
+                    document.getElementById(id + 'Value').textContent = value;
+                });
+            };
+            
+            // Reset to defaults
+            document.getElementById('resetButton').onclick = function() {
+                // Reset multipliers
+                document.getElementById('uncomfortable').value = 2.1;
+                document.getElementById('uncomfortableValue').textContent = "2.1";
+                
+                document.getElementById('sleeping').value = 2.3;
+                document.getElementById('sleepingValue').textContent = "2.3";
+                
+                document.getElementById('crying').value = 2.7;
+                document.getElementById('cryingValue').textContent = "2.7";
+                
+                document.getElementById('laughing').value = 3.9;
+                document.getElementById('laughingValue').textContent = "3.9";
+                
+                document.getElementById('tired').value = 1.5;
+                document.getElementById('tiredValue').textContent = "1.5";
+                
+                document.getElementById('silent').value = 0.9;
+                document.getElementById('silentValue').textContent = "0.9";
+                
+                // Reset thresholds
+                document.getElementById('uncomfortableThreshold').value = 0.3;
+                document.getElementById('uncomfortableThresholdValue').textContent = "0.3";
+                
+                document.getElementById('sleepingThreshold').value = 0.1;
+                document.getElementById('sleepingThresholdValue').textContent = "0.1";
+                
+                document.getElementById('cryingThreshold').value = 0.3;
+                document.getElementById('cryingThresholdValue').textContent = "0.3";
+                
+                document.getElementById('laughingThreshold').value = 0.1;
+                document.getElementById('laughingThresholdValue').textContent = "0.1";
+                
+                document.getElementById('tiredThreshold').value = 0.5;
+                document.getElementById('tiredThresholdValue').textContent = "0.5";
+                
+                document.getElementById('silentThreshold').value = 0.4;
+                document.getElementById('silentThresholdValue').textContent = "0.4";
+            };
+        </script>
+    </body>
+    </html>
+    """
+@app.get("/update-parameters")
+async def get_update_parameters():
+    """Handle incorrect GET requests for update-parameters"""
+    logger.warning("Received GET request for /update-parameters - should be POST")
+    # Redirect to the tuning page instead of showing an error
+    return RedirectResponse(url="/tune-parameters")
+
+@app.post("/update-parameters")
+async def update_parameters(request: Request):
+    """Update model parameters dynamically"""
+    global class_multipliers, class_thresholds
+    # Add CORS headers
+    headers = {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, Accept"
+    }
+    try:
+        logger.info(f"Received update-parameters request: {request.method}")
+        data = await request.json()
+        
+        # Fix: Convert string keys to integers for multipliers
+        if "multipliers" in data:
+            class_multipliers = {int(k): float(v) for k, v in data["multipliers"].items()}
+        else:
+            logger.warning("No multipliers found in request")
+        
+        # Keep thresholds as string keys
+        if "thresholds" in data:
+            class_thresholds = data["thresholds"] 
+        else:
+            logger.warning("No thresholds found in request")
+        
+        logger.info(f"Parameters updated: multipliers={class_multipliers}, thresholds={class_thresholds}")
+        
+        return JSONResponse(
+            content={"status": "success", "message": "Parameters updated"},
+            headers=headers
+        )
+    except Exception as e:
+        logger.error(f"Error in update_parameters: {str(e)}")
+        return JSONResponse(
+            content={"status": "error", "message": str(e)},
+            headers=headers
+        )
+
 
 def list_audio_devices():
     """List available audio input devices"""
@@ -660,29 +977,18 @@ def process_audio_task():
         logger.info("Microphone monitoring stopped")
 
 async def process_audio_queue():
-    # Define class multipliers first
-    class_multipliers = {
-        0: 1.0,  # Boost "uncomfortable" 
-        1: 1.5,  # Boost "sleeping"
-        2: 1.0,  # Boost "crying" slightly
-        3: 2.1,  # Major boost for "laughing" which seems under-predicted
-        4: 0.8,  # Slightly reduce "tired" which seems over-predicted
-        5: 1.0   # Keep "silent" as-is
-    }
-    
 
-    # Create threshold values for each class
-    class_thresholds = {
-        "uncomfortable": 0.40,  # Unwell
-        "sleeping": 0.45,
-        "crying": 0.45,
-        "laughing": 0.29,
-        "tired": 0.65,
-        "silent": 0.70
-    }
+    # Move ALL global declarations to the beginning
+    global prediction_ema, current_prediction, previous_audio_pattern
+    global class_multipliers, class_thresholds
+    # Initialize variables that might not exist yet
+    if 'current_prediction' not in globals():
+        current_prediction = "silent"  # Default prediction
+        
+    if 'previous_audio_pattern' not in globals():
+        previous_audio_pattern = 0.0
     
-    # Add these for temporal smoothing
-    global prediction_ema
+    # Initialize prediction_ema if not already defined
     if 'prediction_ema' not in globals():
         prediction_ema = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.3, 0.7])  # Initially biased to silence
     
@@ -721,7 +1027,7 @@ async def process_audio_queue():
                     logger.info(f"Class probabilities: {[round(float(p), 2) for p in prediction]}")
                     
                     # Apply temporal smoothing with exponential moving average
-                    alpha = 0.3
+                    alpha = 0.5
                     prediction_ema = alpha * prediction + (1 - alpha) * prediction_ema[:6]
                     prediction_ema = prediction_ema / np.sum(prediction_ema)  # Renormalize
                     
@@ -729,12 +1035,7 @@ async def process_audio_queue():
                     adjusted_prediction = np.array([prediction_ema[i] * class_multipliers[i] for i in range(len(prediction_ema))])
                     # Re-normalize to ensure probabilities still sum to 1
                     adjusted_prediction = adjusted_prediction / np.sum(adjusted_prediction)
-                    # Add this right after your adjusted_prediction calculation
-                    if prediction_ema[3] > 0.1:  # If laughing probability is significant
-                        logger.info(f"Laughing probability before adjustment: {prediction[3]:.4f}")
-                        logger.info(f"Laughing probability after EMA: {prediction_ema[3]:.4f}")
-                        logger.info(f"Laughing probability after multiplier: {adjusted_prediction[3]:.4f}")
-                        logger.info(f"Laughing threshold: {dynamic_thresholds['laughing']:.4f}")
+                    
                     # Log both original and adjusted predictions
                     logger.info(f"Original probabilities: {[round(float(p), 2) for p in prediction_ema]}")
                     logger.info(f"Adjusted probabilities: {[round(float(p), 2) for p in adjusted_prediction]}")
@@ -742,12 +1043,10 @@ async def process_audio_queue():
                     # Use adjusted prediction for the rest of your logic
                     prediction_ema = adjusted_prediction
                     
-                    # ADVANCED DECISION LOGIC
+                    # SIMPLIFIED DECISION LOGIC
                     volume_factor = min(1.0, max_volume / 30000)  # Normalize to 0-1
                     
-                    # Audio volume is significant - use smoothed predictions
-                    # Add spectral feature to help identify crying
-                    spectral_variety = np.std(features.reshape(-1)) 
+                    # Use the base thresholds (not dynamic ones)
                     
                     # Reset all counters first to avoid confusion
                     highest_prob_idx = np.argmax(prediction_ema)
@@ -756,31 +1055,22 @@ async def process_audio_queue():
                     
                     logger.info(f"Highest probability class: {highest_prob_class} ({highest_prob_value:.2f})")
                     
-                    # Modify thresholds based on volume
-                    dynamic_thresholds = {}
-                    for class_name, base_threshold in class_thresholds.items():
-                        # Lower volume = higher threshold to avoid false positives
-                        dynamic_thresholds[class_name] = base_threshold + (1 - volume_factor) * 0.05
-                    
-                    # Special adjustment for crying (uses spectral variety)
-                    crying_modifier = 1.0 if spectral_variety > 0.4 else 1.3
-                    dynamic_thresholds["crying"] *= crying_modifier
-                    # Add this right after your crying_modifier line
-                    laughing_spectral_signature = np.std(features.reshape(-1)) * np.max(np.abs(features.reshape(-1)))
-                    laughing_modifier = 1.0 if laughing_spectral_signature > 0.6 else 1.5
-                    dynamic_thresholds["laughing"] *= laughing_modifier
                     # Check each class against its threshold
                     detected_class = None
                     for idx, class_name in enumerate(Config.CLASS_LABELS):
                         if idx != 5:  # Skip silent class in this check
-                            if prediction_ema[idx] > dynamic_thresholds[class_name]:
-                                detected_class = class_name
-                                prediction_counters[class_name] += 1
-                                # Reset other counters
-                                for other_class in Config.CLASS_LABELS:
-                                    if other_class != class_name and other_class != "silent":
-                                        prediction_counters[other_class] = 0
-                                break
+                            if prediction_ema[idx] > class_thresholds[class_name]:
+                                # Use the highest probability class that's above its threshold
+                                if detected_class is None or prediction_ema[idx] > prediction_ema[Config.CLASS_LABELS.index(detected_class)]:
+                                    detected_class = class_name
+                                
+                    # Now increment counter for the single detected class with highest probability
+                    if detected_class:
+                        prediction_counters[detected_class] += 1
+                        # Reset other counters
+                        for other_class in Config.CLASS_LABELS:
+                            if other_class != detected_class and other_class != "silent":
+                                prediction_counters[other_class] = 0
                     
                     # If no class detected above threshold, decay all counters
                     if not detected_class:
@@ -794,36 +1084,24 @@ async def process_audio_queue():
                     # Determine final prediction based on counters
                     predicted_class = "silent"  # Default
                     confidence = float(prediction_ema[5])
-                    
-                    # Check all non-silent classes
+
+                    # Find the highest counter above threshold
+                    max_counter = 0
                     for class_name in Config.CLASS_LABELS:
                         if class_name != "silent":
-                            class_idx = Config.CLASS_LABELS.index(class_name)
-                            if prediction_counters[class_name] >= COUNTER_THRESHOLD:
+                            if prediction_counters[class_name] > max_counter and prediction_counters[class_name] >= COUNTER_THRESHOLD:
+                                max_counter = prediction_counters[class_name]
                                 predicted_class = class_name
+                                class_idx = Config.CLASS_LABELS.index(class_name)
                                 confidence = float(prediction_ema[class_idx])
-                                # Add this in the section where you determine the final prediction
-                                if predicted_class == "laughing":
-                                    # Double-check laughing prediction - it should have significant volume
-                                    if max_volume < 5000:
-                                        # If volume is too low, it's probably not laughter
-                                        prediction_counters["laughing"] = 0
-                                        predicted_class = "silent"
-                                        confidence = float(prediction_ema[5])
-                                break
                     
                     # Generate timestamp
                     timestamp = datetime.now().strftime("%H:%M:%S")
                     
-                    # MODIFIED LOGIC: Always send updates in these cases:
-                    # 1. When prediction changes
-                    # 2. Every 5th frame regardless of change (for live feedback)
-                    # 3. When we detect high volume (> 15000)
-                    global current_prediction
+                    # Send updates when prediction changes or periodically
                     should_update = (
                         predicted_class != current_prediction or  # State changed
-                        update_counter % 5 == 0 or              # Periodic update
-                        max_volume > 20000                      # High volume detected
+                        update_counter % 5 == 0                  # Periodic update
                     )
                     
                     if should_update:
@@ -832,7 +1110,7 @@ async def process_audio_queue():
                             store_cry_event(predicted_class, confidence, "live_audio")
                             current_prediction = predicted_class
                             logger.info(f"Live prediction changed to: {predicted_class} ({confidence:.2f})")
-                        
+                            
                         # Always broadcast for UI updates
                         await manager.broadcast({
                             "status": "success",
@@ -1075,18 +1353,6 @@ async def root():
                             <span class="prediction-time">-</span>
                         </div>
                     </div>
-                    
-                    <div class="form-section">
-                        <h3>Upload Audio</h3>
-                        <form id="upload-form">
-                            <div class="form-group">
-                                <label class="form-label">Audio File (WAV, MP3, M4A)</label>
-                                <input type="file" name="file" class="form-control" accept=".wav,.mp3,.m4a" required>
-                            </div>
-                            <button type="submit" class="btn">Analyze</button>
-                        </form>
-                        <div id="result" class="result-section"></div>
-                    </div>
                 </div>
             </div>
         </div>
@@ -1300,40 +1566,6 @@ async def root():
                     alert('Error updating camera IP');
                 }}
             }}
-
-            // Handle form submission
-            document.getElementById('upload-form').addEventListener('submit', async function(e) {{
-                e.preventDefault();
-                const resultElement = document.getElementById('result');
-                resultElement.textContent = "Uploading and analyzing...";
-                resultElement.className = "result-section";
-                
-                const formData = new FormData(this);
-                
-                try {{
-                    const response = await fetch('/upload-audio', {{
-                        method: 'POST',
-                        body: formData
-                    }});
-                    
-                    const data = await response.json();
-                    
-                    if (data.status === 'success') {{
-                        resultElement.innerHTML = `
-                            <h3 class="success">Analysis Result</h3>
-                            <p>Your baby is: <strong>${{data.reason}}</strong></p>
-                            <p>Confidence: ${{(data.confidence * 100).toFixed(2)}}%</p>
-                        `;
-                        
-                        // Also update the baby status under the video - FIXED with double braces
-                        document.querySelector('.baby-status').innerHTML = `Your baby is <strong>${{data.reason}}</strong>!`;
-                    }} else {{
-                        resultElement.innerHTML = `<p class="error">Error: ${{data.message}}</p>`;
-                    }}
-                }} catch (error) {{
-                    resultElement.innerHTML = `<p class="error">Error: ${{error.message}}</p>`;
-                }}
-            }});
 
             // Function to periodically update baby status
             async function updateBabyStatus() {{

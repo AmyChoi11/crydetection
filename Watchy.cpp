@@ -20,6 +20,26 @@ void Watchy::init(String datetime) {
   Wire.begin(SDA, SCL);
   RTC.init();
 
+  // ADD THIS CODE HERE to connect to your phone's hotspot
+  // Connect to your phone's WiFi hotspot 
+  WiFi.mode(WIFI_STA);  // Set to station mode
+  WiFi.begin("Amy", "Ayaymye1125"); // Replace with your hotspot credentials
+  
+  int retries = 0;
+  while (WiFi.status() != WL_CONNECTED && retries < 20) {
+    delay(500);
+    retries++;
+  }
+  
+  // If connected, get and display IP address
+  if (WiFi.status() == WL_CONNECTED) {
+    String ip = WiFi.localIP().toString();
+    Serial.print("Connected to WiFi. IP address: ");
+    Serial.println(ip);
+  }
+  Wire.begin(SDA, SCL);
+  RTC.init();
+
   // Initialize display
   display.init(0, displayFullInit, 10, true);
   display.epd2.setBusyCallback(displayBusyCallback);
@@ -45,7 +65,41 @@ void Watchy::init(String datetime) {
 
   // Setup HTTP server endpoints
   server.on("/vibrate", HTTP_POST, []() {
-    static_cast<Watchy*>(&watchy)->handleVibration();
+    // Get the raw body of the request
+    String body = server.arg("plain");
+    bool success = false;
+    
+    // Try to parse JSON
+    StaticJsonDocument<200> doc;
+    DeserializationError error = deserializeJson(doc, body);
+    
+    if (!error) {
+      // Check for reason field
+      if (doc.containsKey("reason")) {
+        String reason = doc["reason"];
+        String message = doc.containsKey("message") ? doc["message"].as<String>() : "";
+        
+        // Log what we received
+        Serial.print("Vibration request received: ");
+        Serial.println(reason);
+        
+        // Trigger vibration motor
+        digitalWrite(VIB_MOTOR_PIN, HIGH);
+        delay(VIBRATION_DURATION);
+        digitalWrite(VIB_MOTOR_PIN, LOW);
+        success = true;
+      }
+    }
+    
+    // Also accept simple requests without JSON
+    if (!success) {
+      // Simple vibration when no valid JSON
+      digitalWrite(VIB_MOTOR_PIN, HIGH);
+      delay(VIBRATION_DURATION);
+      digitalWrite(VIB_MOTOR_PIN, LOW);
+    }
+    server.send(200, "text/plain", "Vibration triggered");
+    triggerBabyAlert();
   });
   
   server.on("/status", HTTP_GET, []() {
